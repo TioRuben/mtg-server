@@ -21,6 +21,24 @@ A highly optimized Rust and Python hybrid web application to query, download, an
 
 ### Run with Docker
 
+You can run the application by pulling the pre-built image directly from GitHub Container Registry (GHCR) or by building it locally.
+
+#### Using Pre-built GHCR Image
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/tioruben/mtg-server:latest
+
+# Run the server
+docker run -d \
+  -p 3000:3000 \
+  --env-file .env \
+  --name mtg-server \
+  ghcr.io/tioruben/mtg-server:latest
+```
+
+#### Local Build
+
 1. Create a `.env` file containing your EUMETSAT credentials:
    ```env
    EUMETSAT_CONSUMER_KEY=your_key_here
