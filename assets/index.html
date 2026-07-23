@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0f14">
+<title>MTG · Iberia</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0b0f14; color: #e6edf3;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #viewport { position: fixed; inset: 0; overflow: hidden; touch-action: none; }
+  #image { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform;
+    user-select: none; -webkit-user-drag: none; image-rendering: auto; visibility: hidden; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: center;
+    justify-content: space-between; gap: .5rem; padding: calc(.6rem + env(safe-area-inset-top)) .9rem .6rem;
+    background: linear-gradient(rgba(11,15,20,.85), rgba(11,15,20,0)); pointer-events: none; z-index: 2; }
+  #hud h1 { font-size: .95rem; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+  #time { font-size: .8rem; color: #9fb0c0; white-space: nowrap; }
+  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 1rem; background: rgba(11,15,20,.92); z-index: 3;
+    text-align: center; padding: 2rem; transition: opacity .3s; }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay p { font-size: .95rem; color: #c8d4df; max-width: 26rem; line-height: 1.5; }
+  #overlay .error { color: #ff8f8f; }
+  .spinner { width: 2.6rem; height: 2.6rem; border-radius: 50%; border: 3px solid #22303e;
+    border-top-color: #58a6ff; animation: spin 1s linear infinite; }
+  .spinner.paused { animation: none; border-top-color: #22303e; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header id="hud">
+  <h1>MTG · Iberia</h1>
+  <span id="time"></span>
+</header>
+<div id="viewport"><img id="image" alt="Latest Meteosat Third Generation true-color image of the Iberian Peninsula and the Balearic Islands" draggable="false"></div>
+<div id="overlay">
+  <div class="spinner" id="spinner"></div>
+  <p id="message">Contacting the server…</p>
+</div>
+<script>
+(() => {
+  const viewport = document.getElementById('viewport');
+  const image = document.getElementById('image');
+  const overlay = document.getElementById('overlay');
+  const message = document.getElementById('message');
+  const spinner = document.getElementById('spinner');
+  const timeLabel = document.getElementById('time');
+
+  // --- status polling / image loading -------------------------------------
+  let loadedVersion = null;
+
+  function setOverlay(text, { error = false, spin = true } = {}) {
+    overlay.classList.remove('hidden');
+    message.textContent = text;
+    message.classList.toggle('error', error);
+    spinner.classList.toggle('paused', !spin);
+  }
+
+  function showImage(data) {
+    if (data.generated_unix === loadedVersion) return;
+    const url = data.image_url + '?v=' + data.generated_unix;
+    const loader = new Image();
+    loader.onload = () => {
+      image.src = url;
+      loadedVersion = data.generated_unix;
+      if (data.satellite_time) {
+        timeLabel.textContent = new Date(data.satellite_time).toLocaleString();
+      }
+      requestAnimationFrame(() => { fitImage(); overlay.classList.add('hidden'); });
+    };
+    loader.src = url;
+  }
+
+  async function refresh(kick) {
+    let data;
+    try {
+      const response = await fetch(kick ? '/api/latest' : '/api/status',
+        kick ? { method: 'POST' } : undefined);
+      data = await response.json();
+    } catch {
+      setOverlay('Cannot reach the server. Retrying…', { error: true });
+      setTimeout(() => refresh(true), 5000);
+      return;
+    }
+
+    if (data.image_available) showImage(data);
+
+    if (data.state === 'generating') {
+      if (!data.image_available) {
+        setOverlay('Composing the latest satellite image — downloading raw data from EUMETSAT and building the 0.5 km true-color mosaic. This takes about a minute…');
+      }
+      setTimeout(() => refresh(false), 2500);
+    } else if (data.state === 'error' && !data.image_available) {
+      setOverlay(data.message, { error: true, spin: false });
+      setTimeout(() => refresh(true), 30000);
+    } else if (!data.image_available) {
+      setTimeout(() => refresh(true), 5000);
+    } else {
+      // Ready: re-check periodically so a fresh cycle appears automatically.
+      setTimeout(() => refresh(true), 60000);
+    }
+  }
+
+  // --- pan & pinch-zoom ----------------------------------------------------
+  let scale = 1, minScale = 1, tx = 0, ty = 0;
+  const MAX_SCALE = 12;
+
+  function apply() {
+    image.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  }
+
+  function clamp() {
+    const vw = viewport.clientWidth, vh = viewport.clientHeight;
+    const iw = image.naturalWidth * scale, ih = image.naturalHeight * scale;
+    tx = iw <= vw ? (vw - iw) / 2 : Math.min(0, Math.max(vw - iw, tx));
+    ty = ih <= vh ? (vh - ih) / 2 : Math.min(0, Math.max(vh - ih, ty));
+  }
+
+  function fitImage() {
+    if (!image.naturalWidth) return;
+    const vw = viewport.clientWidth, vh = viewport.clientHeight;
+    minScale = Math.min(vw / image.naturalWidth, vh / image.naturalHeight);
+    scale = minScale;
+    clamp(); apply();
+    image.style.visibility = 'visible';
+  }
+
+  function zoomAt(x, y, factor) {
+    const next = Math.min(MAX_SCALE, Math.max(minScale, scale * factor));
+    factor = next / scale;
+    tx = x - (x - tx) * factor;
+    ty = y - (y - ty) * factor;
+    scale = next;
+    clamp(); apply();
+  }
+
+  const pointers = new Map();
+  let pinchDistance = 0, lastTap = 0;
+
+  viewport.addEventListener('pointerdown', (event) => {
+    viewport.setPointerCapture(event.pointerId);
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchDistance = Math.hypot(a.x - b.x, a.y - b.y);
+    } else if (pointers.size === 1) {
+      const now = Date.now();
+      if (now - lastTap < 300) {
+        const factor = scale < minScale * 3 ? 3 : minScale / scale;
+        zoomAt(event.clientX, event.clientY, factor);
+      }
+      lastTap = now;
+    }
+  });
+
+  viewport.addEventListener('pointermove', (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    const previous = pointers.get(event.pointerId);
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pointers.size === 1) {
+      tx += event.clientX - previous.x;
+      ty += event.clientY - previous.y;
+      clamp(); apply();
+    } else if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      const centerX = (a.x + b.x) / 2, centerY = (a.y + b.y) / 2;
+      if (pinchDistance > 0) zoomAt(centerX, centerY, distance / pinchDistance);
+      pinchDistance = distance;
+    }
+  });
+
+  const release = (event) => { pointers.delete(event.pointerId); pinchDistance = 0; };
+  viewport.addEventListener('pointerup', release);
+  viewport.addEventListener('pointercancel', release);
+
+  viewport.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    zoomAt(event.clientX, event.clientY, event.deltaY < 0 ? 1.2 : 1 / 1.2);
+  }, { passive: false });
+
+  window.addEventListener('resize', fitImage);
+
+  refresh(true);
+})();
+</script>
+</body>
+</html>

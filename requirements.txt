@@ -1,0 +1,6 @@
+satpy>=0.55,<0.56
+pyresample>=1.33,<2
+pyspectral>=0.13,<0.14
+netCDF4>=1.7,<2
+Pillow>=11,<12
+trollimage>=1.24,<2
