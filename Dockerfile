@@ -75,8 +75,19 @@ ENV DASK_SCHEDULER=synchronous
 USER app
 
 # Pre-download Relative Spectral Response (RSR) and Rayleigh correction lookup tables (LUTs)
-RUN download_rsr.py && \
-    download_atm_correction_luts.py -a rayleigh_only
+RUN for attempt in 1 2 3 4 5; do \
+        if download_rsr.py && download_atm_correction_luts.py -a rayleigh_only; then \
+            exit 0; \
+        else \
+            status=$?; \
+        fi; \
+        echo "pyspectral data download failed (attempt $attempt/5; exit $status); retrying" >&2; \
+        rm -rf /home/app/.local/share/pyspectral; \
+        if [ "$attempt" -eq 5 ]; then \
+            exit "$status"; \
+        fi; \
+        sleep $((attempt * 10)); \
+    done
 
 EXPOSE 3000
 

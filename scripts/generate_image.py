@@ -181,17 +181,21 @@ def to_product(collection: str, start: str, feature: dict) -> Product:
 
 
 def recent_pairs(now: datetime, history_hours: int) -> list[ProductPair]:
+    log("querying recent FDHSI and HRFI product listings from EUMETSAT Data Store...")
     fdhsi = by_start(search_latest(COLLECTION_FDHSI))
     hrfi = by_start(search_latest(COLLECTION_HRFI))
     cutoff = now - timedelta(hours=history_hours)
 
     starts = sorted(set(fdhsi) & set(hrfi), reverse=True)
+    log(f"found {len(starts)} matching FDHSI/HRFI observation cycle(s)")
     pairs = []
+    night_count = 0
     for start in starts:
         when = parse_timestamp(start)
         if when < cutoff:
             continue
         if not is_daylight(start):
+            night_count += 1
             continue
         pairs.append(
             ProductPair(
@@ -200,6 +204,8 @@ def recent_pairs(now: datetime, history_hours: int) -> list[ProductPair]:
                 hrfi=to_product(COLLECTION_HRFI, start, hrfi[start]),
             )
         )
+    if night_count > 0:
+        log(f"skipped {night_count} nighttime cycle(s) over Iberia")
     return pairs
 
 
@@ -247,13 +253,15 @@ def download_product(product: Product, token: str, workdir: Path) -> list[Path]:
         f"{urllib.parse.quote(product.identifier, safe='')}/entry"
     )
     paths = []
-    for name in product.entries:
+    total = len(product.entries)
+    for idx, name in enumerate(product.entries, start=1):
         destination = workdir / name
         paths.append(destination)
         if destination.exists() and destination.stat().st_size > 0:
+            log(f"  [{product.collection}] chunk {idx}/{total}: {name} (cached in temp)")
             continue
         url = f"{base}?name={urllib.parse.quote(name, safe='')}"
-        log(f"downloading {name}")
+        log(f"  [{product.collection}] downloading chunk {idx}/{total}: {name}")
 
         def fetch() -> None:
             request = urllib.request.Request(
@@ -298,26 +306,26 @@ def compose(files: list[Path], output: Path) -> str:
     try:
         scene.load([composite, vis_low, vis_high], generate=False)
     except Exception as error:
-        log(f"true_color failed ({error!r}); falling back to raw variant")
+        log(f"  [compose] true_color failed ({error!r}); falling back to raw variant")
         composite = "true_color_raw_with_corrected_green"
         scene.load([composite, vis_low, vis_high], generate=False)
 
-    log("resampling to Iberia grid...")
+    log("  [compose] resampling to Iberia grid (1500x1800)...")
     local = scene.resample(area, resampler="nearest")
 
-    log("generating enhanced true-color base image...")
+    log("  [compose] generating enhanced true-color base image...")
     rgb_img = get_enhanced_image(local[composite])
     rgb_data = rgb_img.data.compute().values
     high = local[vis_high].compute().values
     low = local[vis_low].compute().values
 
-    log("applying high-resolution sharpening...")
+    log("  [compose] applying high-resolution sharpening...")
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where((low > 0.05) & np.isfinite(high), high / low, 1.0)
     ratio = np.clip(ratio, 0.6, 1.4)
     sharpened_data = np.clip(rgb_data * ratio[np.newaxis, :, :], 0.0, 1.0)
 
-    log("rendering PNG...")
+    log("  [compose] rendering PNG...")
     final_xr = xr.DataArray(
         sharpened_data,
         dims=rgb_img.data.dims,
@@ -337,6 +345,7 @@ def generate_frame(pair: ProductPair, token: str, output: Path) -> dict:
     frame_id = frame_id_for(pair.start)
     workdir = Path(tempfile.mkdtemp(prefix=f"mtg-{frame_id}-"))
     try:
+        log(f"  downloading 2x{len(CHUNKS)} NetCDF chunks for frame {frame_id}...")
         files = download_product(pair.fdhsi, token, workdir)
         files += download_product(pair.hrfi, token, workdir)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -364,7 +373,23 @@ def sync_archive(
     archive_dir.mkdir(parents=True, exist_ok=True)
     existing = load_manifest(manifest_path)
     pairs = recent_pairs(datetime.now(UTC), history_hours)
+
+    missing_pairs = [
+        pair
+        for pair in pairs
+        if not (
+            existing.get(frame_id_for(pair.start))
+            and (archive_dir / f"{frame_id_for(pair.start)}.png").exists()
+        )
+    ]
+    cached_count = len(pairs) - len(missing_pairs)
+    log(
+        f"found {len(pairs)} daylight observation cycle(s) in the last {history_hours}h "
+        f"({cached_count} already cached, {len(missing_pairs)} to download/process)"
+    )
+
     keep: dict[str, dict] = {}
+    downloaded_count = 0
 
     for index, pair in enumerate(pairs):
         frame_id = frame_id_for(pair.start)
@@ -374,14 +399,17 @@ def sync_archive(
         if metadata and frame_path.exists():
             keep[frame_id] = metadata
         else:
-            log(f"building frame {pair.start}")
+            downloaded_count += 1
+            log(f"[{downloaded_count}/{len(missing_pairs)}] generating frame {frame_id} (observation: {pair.start})...")
             metadata = generate_frame(pair, token, frame_path)
             keep[frame_id] = metadata
+            log(f"[{downloaded_count}/{len(missing_pairs)}] completed frame {frame_id} (satellite time: {metadata['satellite_time']})")
 
         if index == 0:
             sync_latest_files(frame_path, latest_image, latest_metadata, keep[frame_id])
 
     if not pairs:
+        log("no daylight frames available within archive window; clearing latest")
         clear_latest(latest_image, latest_metadata)
 
     ordered_frames = sorted(
@@ -391,9 +419,19 @@ def sync_archive(
     write_json_atomic(manifest_path, {"frames": ordered_frames})
 
     keep_ids = {frame["id"] for frame in ordered_frames}
+    pruned_count = 0
     for image_path in archive_dir.glob("*.png"):
         if image_path.stem not in keep_ids:
             image_path.unlink(missing_ok=True)
+            pruned_count += 1
+
+    if pruned_count > 0:
+        log(f"pruned {pruned_count} old frame(s) outside {history_hours}h window")
+
+    log(
+        f"archive sync finished: {downloaded_count} new frame(s) downloaded, "
+        f"{len(ordered_frames)} active frame(s) in archive"
+    )
 
 
 def main() -> int:

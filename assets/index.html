@@ -93,6 +93,7 @@
   let scale = 1, minScale = 1, tx = 0, ty = 0;
   let latestFrameId = null;
   let displayedFrameId = null;
+  let imageShown = false;
 
   function setOverlay(text, { error = false, spin = true } = {}) {
     overlay.classList.remove('hidden');
@@ -151,7 +152,8 @@
   }
 
   async function waitForDisplayedImage(expectedSrc) {
-    if (image.currentSrc === expectedSrc && image.complete && image.naturalWidth > 0) {
+    const expectedUrl = new URL(expectedSrc, location.href).href;
+    if (image.currentSrc === expectedUrl && image.complete && image.naturalWidth > 0) {
       return;
     }
 
@@ -161,7 +163,7 @@
         image.removeEventListener('error', onError);
       };
       const onLoad = () => {
-        if (image.currentSrc === expectedSrc || image.src === expectedSrc) {
+        if (image.currentSrc === expectedUrl || image.src === expectedUrl) {
           cleanup();
           resolve();
         }
@@ -185,7 +187,7 @@
       setCurrentFrame(frame);
       hideOverlay();
       requestAnimationFrame(() => {
-        if (resetView || image.style.visibility === 'hidden') {
+        if (resetView || !imageShown) {
           fitImage();
         } else {
           image.style.visibility = 'visible';
@@ -240,7 +242,7 @@
       }
       updateFrameLabel();
 
-      if (image.style.visibility === 'hidden') {
+      if (!imageShown) {
         await showFrameAt(currentIndex, { resetView: true });
       }
 
@@ -282,7 +284,7 @@
       const previousLatestFrameId = latestFrameId;
       latestFrameId = data.frame_id;
       const shouldShowLatest =
-        image.style.visibility === 'hidden' ||
+        !imageShown ||
         !frames.length ||
         displayedFrameId === null ||
         displayedFrameId === previousLatestFrameId;
@@ -293,13 +295,13 @@
           satellite_time: data.satellite_time,
           image_url: data.image_url
         };
-        await showFrame(latestFrame, { resetView: image.style.visibility === 'hidden' });
+        await showFrame(latestFrame, { resetView: !imageShown });
       }
       loadTimeline();
     }
 
     if (data.state === 'syncing') {
-      if (image.style.visibility === 'hidden') {
+      if (!imageShown) {
         setOverlay('Synchronizing the most recent visible satellite frames. This can take a moment on a cold start…');
       }
       setTimeout(() => refresh(false), 2500);
@@ -333,6 +335,7 @@
     clamp();
     apply();
     image.style.visibility = 'visible';
+    imageShown = true;
   }
 
   function zoomAt(x, y, factor) {

@@ -2,8 +2,9 @@ use std::{
     collections::BTreeSet,
     io,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -17,7 +18,12 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::{process::Command, sync::Mutex, time::MissedTickBehavior};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+    sync::Mutex,
+    time::MissedTickBehavior,
+};
 use tracing::{error, info};
 
 const SYNC_DEBOUNCE: Duration = Duration::from_secs(60);
@@ -176,6 +182,16 @@ async fn main() -> Result<()> {
         })?;
 
     let cache = load_cached_metadata(&config.cache_dir).await;
+    if let Some(ref metadata) = cache {
+        info!(
+            frame_id = %metadata.id,
+            satellite_time = %metadata.satellite_time,
+            "loaded cached latest image on startup"
+        );
+    } else {
+        info!("no cached latest image found on startup");
+    }
+
     let state = AppState {
         config: config.clone(),
         runtime: Arc::new(Mutex::new(RuntimeState {
@@ -184,6 +200,7 @@ async fn main() -> Result<()> {
         })),
     };
 
+    info!("triggering initial archive synchronization");
     spawn_sync(&state, true).await;
     spawn_periodic_sync(state.clone());
 
@@ -210,25 +227,63 @@ async fn main() -> Result<()> {
 
 fn spawn_periodic_sync(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(SYNC_INTERVAL);
+        let interval_duration = SYNC_INTERVAL;
+        info!(
+            interval_secs = interval_duration.as_secs(),
+            "started background auto-download scheduler; next check in {} seconds ({}m)",
+            interval_duration.as_secs(),
+            interval_duration.as_secs() / 60
+        );
+        let mut interval = tokio::time::interval(interval_duration);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         interval.tick().await;
 
         loop {
             interval.tick().await;
+            info!(
+                interval_secs = interval_duration.as_secs(),
+                "periodic auto-download timer triggered; starting scheduled sync check"
+            );
             spawn_sync(&state, false).await;
+            info!(
+                next_check_in_secs = interval_duration.as_secs(),
+                "next scheduled image sync check in {} seconds ({}m)",
+                interval_duration.as_secs(),
+                interval_duration.as_secs() / 60
+            );
         }
     });
 }
 
 async fn spawn_sync(state: &AppState, force: bool) {
-    let should_start = state.runtime.lock().await.begin_sync(unix_now(), force);
+    let now = unix_now();
+    let should_start = state.runtime.lock().await.begin_sync(now, force);
 
     if should_start {
+        info!(force, "starting archive synchronization");
         let generation_state = state.clone();
         tokio::spawn(async move {
             generation_state.sync_archive().await;
         });
+    } else {
+        let runtime = state.runtime.lock().await;
+        if runtime.syncing {
+            info!("archive sync is already running; skipping trigger");
+        } else if let Some(last) = runtime.last_sync_started_unix {
+            let elapsed = now.saturating_sub(last);
+            let debounce = SYNC_DEBOUNCE.as_secs();
+            if elapsed < debounce {
+                let remaining = debounce.saturating_sub(elapsed);
+                info!(
+                    elapsed_secs = elapsed,
+                    debounce_secs = debounce,
+                    remaining_secs = remaining,
+                    "sync skipped due to debounce (last sync started {}s ago; {}s remaining until next allowed sync)",
+                    elapsed,
+                    remaining
+                );
+            }
+        }
     }
 }
 
@@ -242,6 +297,7 @@ async fn status(State(state): State<AppState>) -> Json<StatusSnapshot> {
 }
 
 async fn latest(State(state): State<AppState>) -> Json<StatusSnapshot> {
+    info!("manual sync requested via POST /api/latest");
     spawn_sync(&state, true).await;
     let image_exists = state.image_path().is_file();
     Json(state.runtime.lock().await.snapshot(image_exists))
@@ -376,23 +432,47 @@ impl AppState {
     }
 
     async fn sync_archive(&self) {
+        info!("archive sync started");
+        let start_time = Instant::now();
         let result = self.run_generator().await;
+        let elapsed = start_time.elapsed();
         let mut runtime = self.runtime.lock().await;
         runtime.syncing = false;
 
         match result {
             Ok(metadata) => {
+                let available = self.archive_frame_ids().await;
+                let available_count = available.len();
                 if let Some(metadata) = metadata {
-                    info!(satellite_time = %metadata.satellite_time, "archive sync completed");
+                    info!(
+                        duration_secs = elapsed.as_secs_f32(),
+                        latest_frame = %metadata.id,
+                        satellite_time = %metadata.satellite_time,
+                        cached_frames = available_count,
+                        "archive sync completed in {:.1}s: latest observation is {} ({}), {} total frame(s) in archive",
+                        elapsed.as_secs_f32(),
+                        metadata.id,
+                        metadata.satellite_time,
+                        available_count
+                    );
                     runtime.cache = Some(metadata);
                 } else {
-                    info!("archive sync completed with no visible frames");
+                    info!(
+                        duration_secs = elapsed.as_secs_f32(),
+                        "archive sync completed in {:.1}s with no visible frames (nighttime or no coverage)",
+                        elapsed.as_secs_f32()
+                    );
                     runtime.cache = None;
                 }
                 runtime.last_error = None;
             }
             Err(error) => {
-                error!(%error, "archive sync failed");
+                error!(
+                    %error,
+                    duration_secs = elapsed.as_secs_f32(),
+                    "archive sync failed after {:.1}s",
+                    elapsed.as_secs_f32()
+                );
                 runtime.last_error = Some(format!("Archive sync failed: {error:#}"));
             }
         }
@@ -410,7 +490,7 @@ impl AppState {
             .as_deref()
             .context("EUMETSAT_CONSUMER_SECRET or --consumer-secret is required")?;
 
-        let output = Command::new(&self.config.python)
+        let mut child = Command::new(&self.config.python)
             .arg(&self.config.processor)
             .arg("--output")
             .arg(self.image_path())
@@ -422,8 +502,9 @@ impl AppState {
             .arg(self.archive_dir())
             .env("EUMETSAT_CONSUMER_KEY", consumer_key)
             .env("EUMETSAT_CONSUMER_SECRET", consumer_secret)
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| {
                 format!(
                     "failed to start processor {}",
@@ -431,9 +512,38 @@ impl AppState {
                 )
             })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            anyhow::bail!("processor exited with {}: {stderr}", output.status);
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stdout_task = tokio::spawn(async move {
+            if let Some(stdout) = stdout {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        info!(target: "mtg::processor", "{trimmed}");
+                    }
+                }
+            }
+        });
+
+        let stderr_task = tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        info!(target: "mtg::processor", "{trimmed}");
+                    }
+                }
+            }
+        });
+
+        let status = child.wait().await.context("failed to wait for processor")?;
+        let _ = tokio::join!(stdout_task, stderr_task);
+
+        if !status.success() {
+            anyhow::bail!("processor exited with {status}");
         }
 
         Ok(load_cached_metadata(&self.config.cache_dir).await)
