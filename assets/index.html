@@ -10,16 +10,17 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; background: #0b0f14; color: #e6edf3;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  button, input { font: inherit; }
   #viewport { position: fixed; inset: 0; overflow: hidden; touch-action: none; }
   #image { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform;
     user-select: none; -webkit-user-drag: none; image-rendering: auto; visibility: hidden; }
-  #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: center;
-    justify-content: space-between; gap: .5rem; padding: calc(.6rem + env(safe-area-inset-top)) .9rem .6rem;
-    background: linear-gradient(rgba(11,15,20,.85), rgba(11,15,20,0)); pointer-events: none; z-index: 2; }
-  #hud h1 { font-size: .95rem; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
-  #time { font-size: .8rem; color: #9fb0c0; white-space: nowrap; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: flex-start;
+    justify-content: space-between; gap: .75rem; padding: calc(.7rem + env(safe-area-inset-top)) 1rem .6rem;
+    background: linear-gradient(rgba(11,15,20,.85), rgba(11,15,20,0)); pointer-events: none; z-index: 3; }
+  #hud h1 { font-size: .95rem; font-weight: 600; letter-spacing: .02em; }
+  #time { display: block; margin-top: .2rem; font-size: .82rem; color: #9fb0c0; }
   #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 1rem; background: rgba(11,15,20,.92); z-index: 3;
+    justify-content: center; gap: 1rem; background: rgba(11,15,20,.92); z-index: 4;
     text-align: center; padding: 2rem; transition: opacity .3s; }
   #overlay.hidden { opacity: 0; pointer-events: none; }
   #overlay p { font-size: .95rem; color: #c8d4df; max-width: 26rem; line-height: 1.5; }
@@ -27,7 +28,23 @@
   .spinner { width: 2.6rem; height: 2.6rem; border-radius: 50%; border: 3px solid #22303e;
     border-top-color: #58a6ff; animation: spin 1s linear infinite; }
   .spinner.paused { animation: none; border-top-color: #22303e; }
+  #controls { position: fixed; left: 50%; bottom: calc(1rem + env(safe-area-inset-bottom));
+    transform: translateX(-50%); width: min(38rem, calc(100vw - 1.25rem)); padding: .75rem .85rem;
+    border: 1px solid rgba(159,176,192,.2); border-radius: 1rem; background: rgba(11,15,20,.82);
+    backdrop-filter: blur(18px); z-index: 3; display: flex; align-items: center; gap: .75rem; }
+  #transport { display: flex; align-items: center; gap: .45rem; flex-shrink: 0; }
+  .transport-button { width: 2.75rem; height: 2.75rem; border: 0; border-radius: 999px;
+    background: #16202a; color: #e6edf3; display: grid; place-items: center; }
+  .transport-button.primary { background: #1f6feb; }
+  #timeline-slider { flex: 1; accent-color: #58a6ff; min-width: 0; }
+  #frame-label { min-width: 3.5rem; text-align: right; font-size: .8rem; color: #9fb0c0; font-variant-numeric: tabular-nums; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 640px) {
+    #hud { flex-direction: column; gap: .15rem; }
+    #controls { width: calc(100vw - 1rem); gap: .55rem; padding: .7rem .75rem; }
+    .transport-button { width: 2.55rem; height: 2.55rem; }
+    #frame-label { min-width: 2.8rem; font-size: .76rem; }
+  }
 </style>
 </head>
 <body>
@@ -35,7 +52,18 @@
   <h1>MTG · Iberia</h1>
   <span id="time"></span>
 </header>
-<div id="viewport"><img id="image" alt="Latest Meteosat Third Generation true-color image of the Iberian Peninsula and the Balearic Islands" draggable="false"></div>
+<div id="viewport">
+  <img id="image" alt="Meteosat Third Generation true-color image of the Iberian Peninsula and the Balearic Islands" draggable="false">
+</div>
+<div id="controls">
+  <div id="transport">
+    <button class="transport-button" id="previous" aria-label="Previous frame">⏮</button>
+    <button class="transport-button primary" id="play-pause" aria-label="Play animation">▶</button>
+    <button class="transport-button" id="next" aria-label="Next frame">⏭</button>
+  </div>
+  <input id="timeline-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" aria-describedby="frame-label">
+  <span id="frame-label" role="status" aria-live="polite" aria-atomic="true">Frame 0 of 0</span>
+</div>
 <div id="overlay">
   <div class="spinner" id="spinner"></div>
   <p id="message">Contacting the server…</p>
@@ -48,9 +76,24 @@
   const message = document.getElementById('message');
   const spinner = document.getElementById('spinner');
   const timeLabel = document.getElementById('time');
+  const previousButton = document.getElementById('previous');
+  const playPauseButton = document.getElementById('play-pause');
+  const nextButton = document.getElementById('next');
+  const slider = document.getElementById('timeline-slider');
+  const frameLabel = document.getElementById('frame-label');
 
-  // --- status polling / image loading -------------------------------------
-  let loadedVersion = null;
+  const preloadCache = new Map();
+  const PLAY_INTERVAL_MS = 700;
+  const MAX_SCALE = 12;
+
+  let frames = [];
+  let currentIndex = -1;
+  let animationTimer = null;
+  let preloading = false;
+  let scale = 1, minScale = 1, tx = 0, ty = 0;
+  let latestFrameId = null;
+  let displayedFrameId = null;
+  let imageShown = false;
 
   function setOverlay(text, { error = false, spin = true } = {}) {
     overlay.classList.remove('hidden');
@@ -59,19 +102,169 @@
     spinner.classList.toggle('paused', !spin);
   }
 
-  function showImage(data) {
-    if (data.generated_unix === loadedVersion) return;
-    const url = data.image_url + '?v=' + data.generated_unix;
-    const loader = new Image();
-    loader.onload = () => {
-      image.src = url;
-      loadedVersion = data.generated_unix;
-      if (data.satellite_time) {
-        timeLabel.textContent = new Date(data.satellite_time).toLocaleString();
+  function hideOverlay() {
+    overlay.classList.add('hidden');
+  }
+
+  function updateFrameLabel() {
+    const total = frames.length;
+    const current = total && currentIndex >= 0 ? currentIndex + 1 : 0;
+    frameLabel.textContent = `Frame ${current} of ${total}`;
+    slider.max = Math.max(0, total - 1);
+    slider.value = Math.max(0, currentIndex);
+    const enabled = total > 1;
+    slider.disabled = total === 0;
+    previousButton.disabled = !enabled;
+    nextButton.disabled = !enabled;
+    playPauseButton.disabled = total <= 1;
+  }
+
+  function updatePlayPauseButton() {
+    const playing = animationTimer !== null;
+    playPauseButton.textContent = playing ? '❚❚' : '▶';
+    playPauseButton.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
+  }
+
+  function setCurrentFrame(frame) {
+    if (!frame) {
+      timeLabel.textContent = '';
+      return;
+    }
+    timeLabel.textContent = new Date(frame.satellite_time).toLocaleString();
+  }
+
+  function cacheKey(frame) {
+    return `${frame.image_url}?v=${frame.generated_unix}`;
+  }
+
+  function preloadFrame(frame) {
+    const key = cacheKey(frame);
+    if (!preloadCache.has(key)) {
+      preloadCache.set(key, new Promise((resolve, reject) => {
+        const loader = new Image();
+        loader.decoding = 'async';
+        loader.onload = () => resolve(key);
+        loader.onerror = reject;
+        loader.src = key;
+      }));
+    }
+    return preloadCache.get(key);
+  }
+
+  async function waitForDisplayedImage(expectedSrc) {
+    const expectedUrl = new URL(expectedSrc, location.href).href;
+    if (image.currentSrc === expectedUrl && image.complete && image.naturalWidth > 0) {
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        image.removeEventListener('load', onLoad);
+        image.removeEventListener('error', onError);
+      };
+      const onLoad = () => {
+        if (image.currentSrc === expectedUrl || image.src === expectedUrl) {
+          cleanup();
+          resolve();
+        }
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('display image failed to load'));
+      };
+      image.addEventListener('load', onLoad);
+      image.addEventListener('error', onError);
+    });
+  }
+
+  async function showFrame(frame, { resetView = false } = {}) {
+    try {
+      const key = cacheKey(frame);
+      await preloadFrame(frame);
+      image.src = key;
+      await waitForDisplayedImage(key);
+      displayedFrameId = frame.id;
+      setCurrentFrame(frame);
+      hideOverlay();
+      requestAnimationFrame(() => {
+        if (resetView || !imageShown) {
+          fitImage();
+        } else {
+          image.style.visibility = 'visible';
+        }
+      });
+    } catch {
+      setOverlay('Failed to load image frame. Retrying…', { error: true });
+    }
+  }
+
+  async function showFrameAt(index, options = {}) {
+    if (index < 0 || index >= frames.length) return;
+    currentIndex = index;
+    updateFrameLabel();
+    await showFrame(frames[index], options);
+  }
+
+  function stopPlayback() {
+    if (animationTimer !== null) {
+      clearInterval(animationTimer);
+      animationTimer = null;
+      updatePlayPauseButton();
+    }
+  }
+
+  function startPlayback() {
+    if (frames.length <= 1 || animationTimer !== null) return;
+    animationTimer = setInterval(() => {
+      showFrameAt((currentIndex + 1) % frames.length);
+    }, PLAY_INTERVAL_MS);
+    updatePlayPauseButton();
+  }
+
+  async function loadTimeline() {
+    try {
+      const currentFrameId =
+        currentIndex >= 0 && currentIndex < frames.length ? frames[currentIndex].id : latestFrameId;
+      const response = await fetch('/api/timeline');
+      if (!response.ok) throw new Error('timeline request failed');
+      const data = await response.json();
+      frames = Array.isArray(data.frames) ? data.frames : [];
+      latestFrameId = frames.length ? frames[frames.length - 1].id : latestFrameId;
+      updateFrameLabel();
+
+      if (!frames.length) return;
+
+      const activeIndex = frames.findIndex((frame) => frame.id === currentFrameId);
+      if (activeIndex >= 0) {
+        currentIndex = activeIndex;
+      } else {
+        currentIndex = frames.length - 1;
       }
-      requestAnimationFrame(() => { fitImage(); overlay.classList.add('hidden'); });
-    };
-    loader.src = url;
+      updateFrameLabel();
+
+      if (!imageShown) {
+        await showFrameAt(currentIndex, { resetView: true });
+      }
+
+      preloadRemainingFrames();
+    } catch {
+      // Keep the currently displayed latest image and retry on the next refresh.
+    }
+  }
+
+  async function preloadRemainingFrames() {
+    if (preloading) return;
+    preloading = true;
+    const snapshot = frames.slice();
+    const activeIndex = currentIndex;
+    try {
+      for (let index = snapshot.length - 1; index >= 0; index -= 1) {
+        if (index === activeIndex) continue;
+        await preloadFrame(snapshot[index]);
+      }
+    } finally {
+      preloading = false;
+    }
   }
 
   async function refresh(kick) {
@@ -79,6 +272,7 @@
     try {
       const response = await fetch(kick ? '/api/latest' : '/api/status',
         kick ? { method: 'POST' } : undefined);
+      if (!response.ok) throw new Error('status request failed');
       data = await response.json();
     } catch {
       setOverlay('Cannot reach the server. Retrying…', { error: true });
@@ -86,27 +280,41 @@
       return;
     }
 
-    if (data.image_available) showImage(data);
+    if (data.image_available && data.image_url && data.frame_id) {
+      const previousLatestFrameId = latestFrameId;
+      latestFrameId = data.frame_id;
+      const shouldShowLatest =
+        !imageShown ||
+        !frames.length ||
+        displayedFrameId === null ||
+        displayedFrameId === previousLatestFrameId;
+      if (shouldShowLatest) {
+        const latestFrame = {
+          id: data.frame_id,
+          generated_unix: data.generated_unix,
+          satellite_time: data.satellite_time,
+          image_url: data.image_url
+        };
+        await showFrame(latestFrame, { resetView: !imageShown });
+      }
+      loadTimeline();
+    }
 
-    if (data.state === 'generating') {
-      if (!data.image_available) {
-        setOverlay('Composing the latest satellite image — downloading raw data from EUMETSAT and building the 0.5 km true-color mosaic. This takes about a minute…');
+    if (data.state === 'syncing') {
+      if (!imageShown) {
+        setOverlay('Synchronizing the most recent visible satellite frames. This can take a moment on a cold start…');
       }
       setTimeout(() => refresh(false), 2500);
     } else if (data.state === 'error' && !data.image_available) {
       setOverlay(data.message, { error: true, spin: false });
       setTimeout(() => refresh(true), 30000);
     } else if (!data.image_available) {
-      setTimeout(() => refresh(true), 5000);
+      setOverlay('No visible images are available right now. The server will try again soon.', { spin: false });
+      setTimeout(() => refresh(true), 15000);
     } else {
-      // Ready: re-check periodically so a fresh cycle appears automatically.
-      setTimeout(() => refresh(true), 60000);
+      setTimeout(() => refresh(false), 60000);
     }
   }
-
-  // --- pan & pinch-zoom ----------------------------------------------------
-  let scale = 1, minScale = 1, tx = 0, ty = 0;
-  const MAX_SCALE = 12;
 
   function apply() {
     image.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
@@ -124,8 +332,10 @@
     const vw = viewport.clientWidth, vh = viewport.clientHeight;
     minScale = Math.min(vw / image.naturalWidth, vh / image.naturalHeight);
     scale = minScale;
-    clamp(); apply();
+    clamp();
+    apply();
     image.style.visibility = 'visible';
+    imageShown = true;
   }
 
   function zoomAt(x, y, factor) {
@@ -134,7 +344,8 @@
     tx = x - (x - tx) * factor;
     ty = y - (y - ty) * factor;
     scale = next;
-    clamp(); apply();
+    clamp();
+    apply();
   }
 
   const pointers = new Map();
@@ -164,17 +375,22 @@
     if (pointers.size === 1) {
       tx += event.clientX - previous.x;
       ty += event.clientY - previous.y;
-      clamp(); apply();
+      clamp();
+      apply();
     } else if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       const distance = Math.hypot(a.x - b.x, a.y - b.y);
-      const centerX = (a.x + b.x) / 2, centerY = (a.y + b.y) / 2;
+      const centerX = (a.x + b.x) / 2;
+      const centerY = (a.y + b.y) / 2;
       if (pinchDistance > 0) zoomAt(centerX, centerY, distance / pinchDistance);
       pinchDistance = distance;
     }
   });
 
-  const release = (event) => { pointers.delete(event.pointerId); pinchDistance = 0; };
+  const release = (event) => {
+    pointers.delete(event.pointerId);
+    pinchDistance = 0;
+  };
   viewport.addEventListener('pointerup', release);
   viewport.addEventListener('pointercancel', release);
 
@@ -183,8 +399,33 @@
     zoomAt(event.clientX, event.clientY, event.deltaY < 0 ? 1.2 : 1 / 1.2);
   }, { passive: false });
 
+  previousButton.addEventListener('click', () => {
+    stopPlayback();
+    showFrameAt(Math.max(0, currentIndex - 1));
+  });
+
+  nextButton.addEventListener('click', () => {
+    stopPlayback();
+    showFrameAt(Math.min(frames.length - 1, currentIndex + 1));
+  });
+
+  playPauseButton.addEventListener('click', () => {
+    if (animationTimer !== null) {
+      stopPlayback();
+    } else {
+      startPlayback();
+    }
+  });
+
+  slider.addEventListener('input', (event) => {
+    stopPlayback();
+    showFrameAt(Number(event.target.value));
+  });
+
   window.addEventListener('resize', fitImage);
 
+  updateFrameLabel();
+  updatePlayPauseButton();
   refresh(true);
 })();
 </script>
