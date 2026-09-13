@@ -150,11 +150,37 @@
     return preloadCache.get(key);
   }
 
+  async function waitForDisplayedImage(expectedSrc) {
+    if (image.currentSrc === expectedSrc && image.complete && image.naturalWidth > 0) {
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        image.removeEventListener('load', onLoad);
+        image.removeEventListener('error', onError);
+      };
+      const onLoad = () => {
+        if (image.currentSrc === expectedSrc || image.src === expectedSrc) {
+          cleanup();
+          resolve();
+        }
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('display image failed to load'));
+      };
+      image.addEventListener('load', onLoad);
+      image.addEventListener('error', onError);
+    });
+  }
+
   async function showFrame(frame, { resetView = false } = {}) {
     try {
       const key = cacheKey(frame);
       await preloadFrame(frame);
       image.src = key;
+      await waitForDisplayedImage(key);
       displayedFrameId = frame.id;
       setCurrentFrame(frame);
       hideOverlay();
