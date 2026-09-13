@@ -54,6 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy python virtual environment and scripts
 COPY --from=python-builder /app/venv /app/venv
 COPY scripts/ /app/scripts/
+COPY --chown=app:app vendor/pyspectral/ /opt/pyspectral-fallback/
 
 # Copy Rust compiled binary
 COPY --from=rust-builder /app/target/release/mtg /usr/local/bin/mtg
@@ -75,19 +76,22 @@ ENV DASK_SCHEDULER=synchronous
 USER app
 
 # Pre-download Relative Spectral Response (RSR) and Rayleigh correction lookup tables (LUTs)
-RUN for attempt in 1 2 3 4 5; do \
+RUN for attempt in 1 2; do \
         if download_rsr.py && download_atm_correction_luts.py -a rayleigh_only; then \
             exit 0; \
         else \
             status=$?; \
         fi; \
-        echo "pyspectral data download failed (attempt $attempt/5; exit $status); retrying" >&2; \
+        echo "pyspectral data download failed (attempt $attempt/2; exit $status)" >&2; \
         rm -rf /home/app/.local/share/pyspectral; \
-        if [ "$attempt" -eq 5 ]; then \
-            exit "$status"; \
+        if [ "$attempt" -eq 2 ]; then \
+            break; \
         fi; \
         sleep $((attempt * 10)); \
-    done
+    done; \
+    echo "using vendored Pyspectral FCI data" >&2; \
+    mkdir -p /home/app/.local/share/pyspectral; \
+    cp -a /opt/pyspectral-fallback/. /home/app/.local/share/pyspectral/
 
 EXPOSE 3000
 

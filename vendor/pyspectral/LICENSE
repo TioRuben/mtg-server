@@ -1,0 +1,12 @@
+Third-Party Data Notice
+
+The files in this directory are Pyspectral reference data downloaded from Zenodo:
+
+- Relative spectral response data: https://zenodo.org/records/14008148
+- Atmospheric correction lookup tables: https://zenodo.org/records/1288441
+
+Zenodo is the hosting and archival service for these files. Copyright and other
+rights remain with the original data authors and are governed by the license
+published with the corresponding Zenodo records. This copy is included solely
+to make the MTG FCI true-color processing image reproducible without requiring
+a network download during Docker builds.
