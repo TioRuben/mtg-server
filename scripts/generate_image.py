@@ -256,7 +256,10 @@ def download_product(product: Product, token: str, workdir: Path) -> list[Path]:
         log(f"downloading {name}")
 
         def fetch() -> None:
-            request = urllib.request.Request(url, headers={"Authorization": f"******"})
+            request = urllib.request.Request(
+                url,
+                headers={"Authorization": "Bearer " + token},
+            )
             with urllib.request.urlopen(request, timeout=600) as response:
                 temporary = destination.with_suffix(".part")
                 with open(temporary, "wb") as handle:

@@ -61,8 +61,8 @@
     <button class="transport-button primary" id="play-pause" aria-label="Play animation">▶</button>
     <button class="transport-button" id="next" aria-label="Next frame">⏭</button>
   </div>
-  <input id="timeline-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline">
-  <span id="frame-label">0/0</span>
+  <input id="timeline-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" aria-describedby="frame-label">
+  <span id="frame-label" role="status" aria-live="polite" aria-atomic="true">Frame 0 of 0</span>
 </div>
 <div id="overlay">
   <div class="spinner" id="spinner"></div>
@@ -107,7 +107,7 @@
   function updateFrameLabel() {
     const total = frames.length;
     const current = total && currentIndex >= 0 ? currentIndex + 1 : 0;
-    frameLabel.textContent = `${current}/${total}`;
+    frameLabel.textContent = `Frame ${current} of ${total}`;
     slider.max = Math.max(0, total - 1);
     slider.value = Math.max(0, currentIndex);
     const enabled = total > 1;
@@ -193,6 +193,8 @@
 
   async function loadTimeline() {
     try {
+      const currentFrameId =
+        currentIndex >= 0 && currentIndex < frames.length ? frames[currentIndex].id : latestFrameId;
       const response = await fetch('/api/timeline');
       const data = await response.json();
       frames = Array.isArray(data.frames) ? data.frames : [];
@@ -201,10 +203,10 @@
 
       if (!frames.length) return;
 
-      const activeIndex = frames.findIndex((frame) => frame.id === latestFrameId);
+      const activeIndex = frames.findIndex((frame) => frame.id === currentFrameId);
       if (activeIndex >= 0) {
         currentIndex = activeIndex;
-      } else if (currentIndex < 0 || currentIndex >= frames.length) {
+      } else {
         currentIndex = frames.length - 1;
       }
       updateFrameLabel();
@@ -222,10 +224,12 @@
   async function preloadRemainingFrames() {
     if (preloading) return;
     preloading = true;
+    const snapshot = frames.slice();
+    const activeIndex = currentIndex;
     try {
-      for (let index = frames.length - 1; index >= 0; index -= 1) {
-        if (index === currentIndex) continue;
-        await preloadFrame(frames[index]);
+      for (let index = snapshot.length - 1; index >= 0; index -= 1) {
+        if (index === activeIndex) continue;
+        await preloadFrame(snapshot[index]);
       }
     } finally {
       preloading = false;

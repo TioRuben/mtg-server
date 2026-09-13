@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeSet,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -166,7 +168,12 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to create {}", config.cache_dir.display()))?;
     tokio::fs::create_dir_all(config.cache_dir.join("archive"))
         .await
-        .with_context(|| format!("failed to create {}", config.cache_dir.join("archive").display()))?;
+        .with_context(|| {
+            format!(
+                "failed to create {}",
+                config.cache_dir.join("archive").display()
+            )
+        })?;
 
     let cache = load_cached_metadata(&config.cache_dir).await;
     let state = AppState {
@@ -215,11 +222,7 @@ fn spawn_periodic_sync(state: AppState) {
 }
 
 async fn spawn_sync(state: &AppState, force: bool) {
-    let should_start = state
-        .runtime
-        .lock()
-        .await
-        .begin_sync(unix_now(), force);
+    let should_start = state.runtime.lock().await.begin_sync(unix_now(), force);
 
     if should_start {
         let generation_state = state.clone();
@@ -251,7 +254,16 @@ async fn timeline(State(state): State<AppState>) -> Json<TimelineSnapshot> {
 }
 
 async fn image(State(state): State<AppState>) -> Response {
-    serve_png(state.image_path()).await
+    match tokio::fs::read(state.image_path()).await {
+        Ok(bytes) => png_response(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, "image is not ready").into_response()
+        }
+        Err(error) => {
+            error!(%error, "failed to read cached image");
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed to read image").into_response()
+        }
+    }
 }
 
 async fn archived_image(
@@ -262,27 +274,19 @@ async fn archived_image(
         return (StatusCode::NOT_FOUND, "unknown frame").into_response();
     }
 
-    let manifest = load_timeline_manifest(state.manifest_path()).await.unwrap_or_default();
-    let Some(frame) = manifest.frames.into_iter().find(|frame| frame.id == frame_id) else {
+    let manifest = load_timeline_manifest(state.manifest_path())
+        .await
+        .unwrap_or_default();
+    let Some(frame) = manifest
+        .frames
+        .into_iter()
+        .find(|frame| frame.id == frame_id)
+    else {
         return (StatusCode::NOT_FOUND, "unknown frame").into_response();
     };
 
-    serve_png(state.archive_path(&frame.id)).await
-}
-
-async fn serve_png(path: PathBuf) -> Response {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => {
-            let mut response = Response::new(Body::from(bytes));
-            response
-                .headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-            response.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=60"),
-            );
-            response
-        }
+    match state.read_archive_frame(&frame.id).await {
+        Ok(bytes) => png_response(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (StatusCode::NOT_FOUND, "image is not ready").into_response()
         }
@@ -291,6 +295,18 @@ async fn serve_png(path: PathBuf) -> Response {
             (StatusCode::INTERNAL_SERVER_ERROR, "failed to read image").into_response()
         }
     }
+}
+
+fn png_response(bytes: Vec<u8>) -> Response {
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60"),
+    );
+    response
 }
 
 impl AppState {
@@ -310,27 +326,53 @@ impl AppState {
         self.config.cache_dir.join("archive")
     }
 
-    fn archive_path(&self, frame_id: &str) -> PathBuf {
-        self.archive_dir().join(format!("{frame_id}.png"))
+    fn archive_path(&self, frame_id: &str) -> Option<PathBuf> {
+        if !is_valid_frame_id(frame_id) {
+            return None;
+        }
+
+        Some(self.archive_dir().join(format!("{frame_id}.png")))
+    }
+
+    async fn read_archive_frame(&self, frame_id: &str) -> io::Result<Vec<u8>> {
+        let Some(path) = self.archive_path(frame_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "unknown archive frame",
+            ));
+        };
+
+        tokio::fs::read(path).await
+    }
+
+    async fn archive_frame_ids(&self) -> BTreeSet<String> {
+        let mut frames = BTreeSet::new();
+        let Ok(mut entries) = tokio::fs::read_dir(self.archive_dir()).await else {
+            return frames;
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".png") else {
+                continue;
+            };
+            if is_valid_frame_id(stem) {
+                frames.insert(stem.to_owned());
+            }
+        }
+
+        frames
     }
 
     async fn timeline_snapshot(&self) -> Vec<TimelineFrameSnapshot> {
         let manifest = load_timeline_manifest(self.manifest_path())
             .await
             .unwrap_or_default();
+        let available = self.archive_frame_ids().await;
 
-        manifest
-            .frames
-            .into_iter()
-            .filter(|frame| is_valid_frame_id(&frame.id) && self.archive_path(&frame.id).is_file())
-            .map(|frame| TimelineFrameSnapshot {
-                image_url: format!("/image/frames/{}", frame.id),
-                id: frame.id,
-                generated_unix: frame.generated_unix,
-                satellite_time: frame.satellite_time,
-                product_id: frame.product_id,
-            })
-            .collect()
+        timeline_frames(manifest.frames, &available)
     }
 
     async fn sync_archive(&self) {
@@ -398,6 +440,22 @@ impl AppState {
     }
 }
 
+fn timeline_frames(
+    frames: Vec<FrameMetadata>,
+    available: &BTreeSet<String>,
+) -> Vec<TimelineFrameSnapshot> {
+    frames
+        .into_iter()
+        .filter(|frame| available.contains(&frame.id))
+        .map(|frame| TimelineFrameSnapshot {
+            image_url: format!("/image/frames/{}", frame.id),
+            id: frame.id,
+            generated_unix: frame.generated_unix,
+            satellite_time: frame.satellite_time,
+        })
+        .collect()
+}
+
 async fn load_cached_metadata(cache_dir: &Path) -> Option<FrameMetadata> {
     if !cache_dir.join("latest.png").is_file() {
         return None;
@@ -407,8 +465,8 @@ async fn load_cached_metadata(cache_dir: &Path) -> Option<FrameMetadata> {
     serde_json::from_slice(&bytes).ok()
 }
 
-async fn load_timeline_manifest(path: PathBuf) -> Option<TimelineManifest> {
-    let bytes = tokio::fs::read(path).await.ok()?;
+async fn load_timeline_manifest(cache_dir: PathBuf) -> Option<TimelineManifest> {
+    let bytes = tokio::fs::read(cache_dir).await.ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -418,9 +476,9 @@ fn is_valid_frame_id(frame_id: &str) -> bool {
     }
 
     let bytes = frame_id.as_bytes();
-    bytes[..8].iter().all(u8::is_ascii_digit)
+    bytes[..8].iter().all(|byte| byte.is_ascii_digit())
         && bytes[8] == b'T'
-        && bytes[9..15].iter().all(u8::is_ascii_digit)
+        && bytes[9..15].iter().all(|byte| byte.is_ascii_digit())
         && bytes[15] == b'Z'
 }
 
@@ -480,5 +538,30 @@ mod tests {
         assert!(is_valid_frame_id("20260913T102523Z"));
         assert!(!is_valid_frame_id("../latest"));
         assert!(!is_valid_frame_id("2026-09-13T102523Z"));
+    }
+
+    #[test]
+    fn timeline_filters_missing_frames() {
+        let frames = vec![
+            FrameMetadata {
+                id: "20260723T120007Z".to_owned(),
+                generated_unix: 1,
+                satellite_time: "2026-07-23T12:00:07Z".to_owned(),
+                product_id: "one".to_owned(),
+            },
+            FrameMetadata {
+                id: "20260723T121007Z".to_owned(),
+                generated_unix: 2,
+                satellite_time: "2026-07-23T12:10:07Z".to_owned(),
+                product_id: "two".to_owned(),
+            },
+        ];
+        let available = BTreeSet::from(["20260723T121007Z".to_owned()]);
+
+        let snapshots = timeline_frames(frames, &available);
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id, "20260723T121007Z");
+        assert_eq!(snapshots[0].image_url, "/image/frames/20260723T121007Z");
     }
 }

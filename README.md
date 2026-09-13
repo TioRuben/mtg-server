@@ -4,6 +4,8 @@ A highly optimized Rust and Python hybrid web application to query, download, an
 
 ## Features
 - **Fast Rust Backend**: An asynchronous `axum`-based HTTP server handles fast caching, cache-control, metadata lookups, and orchestrates the image processing worker safely.
+- **Automatic Rolling Archive**: The server keeps roughly the last 6 hours of visible-only MTG frames in an ephemeral on-disk cache, refreshes them automatically, and prunes old images without using a database.
+- **Mobile-friendly Animation UI**: The browser opens on the newest frame, preloads the remaining archive in the background, and offers playback controls plus pinch-zoom/pan support.
 - **Python Image Processor**: Utilizes `Satpy` and `Pyresample` to parse complex satellite NetCDF data, resample onto a precise geographical region over Iberia, and apply high-resolution ratio sharpening with the 0.5 km `vis_06_hr` channel.
 - **Efficient Downloader**: Pre-filtered body chunk selection downloads only the exact segments covering Spain, Portugal, and the Balearic Islands, minimizing bandwidth usage and processing time.
 - **Optimized & Self-contained Docker Image**:
@@ -70,22 +72,33 @@ Returns a JSON snapshot of the server's state, indicating whether an image is av
     "state": "ready",
     "image_available": true,
     "image_url": "/image/latest.png",
+    "frame_id": "20260723T182007Z",
     "generated_unix": 1784826123,
     "satellite_time": "2026-07-23T18:20:07Z",
     "message": "Latest observation ready"
   }
   ```
 
-### 2. Request Latest Generation
-Initiates a new generation worker if the cache TTL (10 minutes) has expired. This runs asynchronously and does not block the caller.
+### 2. Request an Immediate Sync
+Triggers an immediate archive synchronization. The server already performs this automatically in the background, but this endpoint lets the UI request a refresh right away.
 
 - **Endpoint**: `POST /api/latest`
 - **Response**: Same as status endpoint.
 
-### 3. Get Image
+### 3. Timeline
+Returns the cached animation frames in chronological order.
+
+- **Endpoint**: `GET /api/timeline`
+
+### 4. Get Latest Image
 Serves the latest rendered high-resolution true-color PNG.
 
 - **Endpoint**: `GET /image/latest.png`
+
+### 5. Get Archived Frame
+Serves a specific cached frame from the rolling archive.
+
+- **Endpoint**: `GET /image/frames/{frame_id}`
 
 ---
 
@@ -97,7 +110,7 @@ You can configure the server using command line arguments or environment variabl
 |---|---|---|---|
 | `--host` | `HTTP_HOST` | `0.0.0.0` | Host interface to bind to |
 | `--port` | `HTTP_PORT` | `3000` | Port to expose the HTTP server on |
-| `--cache-dir` | `MTG_CACHE_DIR` | `/app/cache` | Directory to save images and metadata |
+| `--cache-dir` | `MTG_CACHE_DIR` | `/app/cache` | Ephemeral directory to save latest image, archive frames, and metadata |
 | `--consumer-key` | `EUMETSAT_CONSUMER_KEY` | - | Your EUMETSAT API key |
 | `--consumer-secret` | `EUMETSAT_CONSUMER_SECRET` | - | Your EUMETSAT API secret |
 
