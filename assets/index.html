@@ -92,6 +92,7 @@
   let preloading = false;
   let scale = 1, minScale = 1, tx = 0, ty = 0;
   let latestFrameId = null;
+  let displayedFrameId = null;
 
   function setOverlay(text, { error = false, spin = true } = {}) {
     overlay.classList.remove('hidden');
@@ -154,6 +155,7 @@
       const key = cacheKey(frame);
       await preloadFrame(frame);
       image.src = key;
+      displayedFrameId = frame.id;
       setCurrentFrame(frame);
       hideOverlay();
       requestAnimationFrame(() => {
@@ -196,6 +198,7 @@
       const currentFrameId =
         currentIndex >= 0 && currentIndex < frames.length ? frames[currentIndex].id : latestFrameId;
       const response = await fetch('/api/timeline');
+      if (!response.ok) throw new Error('timeline request failed');
       const data = await response.json();
       frames = Array.isArray(data.frames) ? data.frames : [];
       latestFrameId = frames.length ? frames[frames.length - 1].id : latestFrameId;
@@ -241,6 +244,7 @@
     try {
       const response = await fetch(kick ? '/api/latest' : '/api/status',
         kick ? { method: 'POST' } : undefined);
+      if (!response.ok) throw new Error('status request failed');
       data = await response.json();
     } catch {
       setOverlay('Cannot reach the server. Retrying…', { error: true });
@@ -249,8 +253,14 @@
     }
 
     if (data.image_available && data.image_url && data.frame_id) {
+      const previousLatestFrameId = latestFrameId;
       latestFrameId = data.frame_id;
-      if (!frames.length || image.style.visibility === 'hidden') {
+      const shouldShowLatest =
+        image.style.visibility === 'hidden' ||
+        !frames.length ||
+        displayedFrameId === null ||
+        displayedFrameId === previousLatestFrameId;
+      if (shouldShowLatest) {
         const latestFrame = {
           id: data.frame_id,
           generated_unix: data.generated_unix,

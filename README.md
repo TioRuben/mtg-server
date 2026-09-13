@@ -80,7 +80,7 @@ Returns a JSON snapshot of the server's state, indicating whether an image is av
   ```
 
 ### 2. Request an Immediate Sync
-Triggers an immediate archive synchronization. The server already performs this automatically in the background, but this endpoint lets the UI request a refresh right away.
+Requests an immediate archive synchronization when no sync is already running. The server already performs this automatically in the background, and this endpoint returns the current status either way.
 
 - **Endpoint**: `POST /api/latest`
 - **Response**: Same as status endpoint.
