@@ -32,10 +32,15 @@
     transform: translateX(-50%); width: min(38rem, calc(100vw - 1.25rem)); padding: .75rem .85rem;
     border: 1px solid rgba(159,176,192,.2); border-radius: 1rem; background: rgba(11,15,20,.82);
     backdrop-filter: blur(18px); z-index: 3; display: flex; align-items: center; gap: .75rem; }
-  #transport { display: flex; align-items: center; gap: .45rem; flex-shrink: 0; }
-  .transport-button { width: 2.75rem; height: 2.75rem; border: 0; border-radius: 999px;
-    background: #16202a; color: #e6edf3; display: grid; place-items: center; }
+  #transport { position: relative; display: flex; align-items: center; gap: .45rem; flex-shrink: 0; }
+  .transport-button { width: 2.75rem; height: 2.75rem; border: 0; border-radius: 999px; padding: 0;
+    background: #16202a; color: #e6edf3; display: grid; place-items: center; line-height: 0; }
   .transport-button.primary { background: #1f6feb; }
+  .transport-button svg { width: 1.3rem; height: 1.3rem; display: block; fill: currentColor; }
+  #transport.loading .transport-button { visibility: hidden; }
+  .mini-spinner { width: 1.4rem; height: 1.4rem; border-radius: 50%; border: 2px solid rgba(230,237,243,.25);
+    border-top-color: #58a6ff; animation: spin .8s linear infinite; position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%); pointer-events: none; }
   #timeline-slider { flex: 1; accent-color: #58a6ff; min-width: 0; }
   #frame-label { min-width: 3.5rem; text-align: right; font-size: .8rem; color: #9fb0c0; font-variant-numeric: tabular-nums; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -57,9 +62,10 @@
 </div>
 <div id="controls">
   <div id="transport">
-    <button class="transport-button" id="previous" aria-label="Previous frame">⏮</button>
-    <button class="transport-button primary" id="play-pause" aria-label="Play animation">▶</button>
-    <button class="transport-button" id="next" aria-label="Next frame">⏭</button>
+    <button class="transport-button" id="previous" aria-label="Previous frame"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
+    <button class="transport-button primary" id="play-pause" aria-label="Play animation"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+    <button class="transport-button" id="next" aria-label="Next frame"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+    <span class="mini-spinner" id="transport-spinner" hidden></span>
   </div>
   <input id="timeline-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" aria-describedby="frame-label">
   <span id="frame-label" role="status" aria-live="polite" aria-atomic="true">Frame 0 of 0</span>
@@ -81,6 +87,11 @@
   const nextButton = document.getElementById('next');
   const slider = document.getElementById('timeline-slider');
   const frameLabel = document.getElementById('frame-label');
+  const transport = document.getElementById('transport');
+  const transportSpinner = document.getElementById('transport-spinner');
+
+  const PLAY_ICON = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+  const PAUSE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
 
   const preloadCache = new Map();
   const PLAY_INTERVAL_MS = 700;
@@ -94,6 +105,7 @@
   let latestFrameId = null;
   let displayedFrameId = null;
   let imageShown = false;
+  let timelineReady = false;
 
   function setOverlay(text, { error = false, spin = true } = {}) {
     overlay.classList.remove('hidden');
@@ -121,8 +133,13 @@
 
   function updatePlayPauseButton() {
     const playing = animationTimer !== null;
-    playPauseButton.textContent = playing ? '❚❚' : '▶';
+    playPauseButton.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
     playPauseButton.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
+  }
+
+  function setTransportLoading(loading) {
+    transport.classList.toggle('loading', loading);
+    transportSpinner.hidden = !loading;
   }
 
   function setCurrentFrame(frame) {
@@ -185,9 +202,11 @@
       await waitForDisplayedImage(key);
       displayedFrameId = frame.id;
       setCurrentFrame(frame);
+      const needsFit = resetView || !imageShown;
+      imageShown = true;
       hideOverlay();
       requestAnimationFrame(() => {
-        if (resetView || !imageShown) {
+        if (needsFit) {
           fitImage();
         } else {
           image.style.visibility = 'visible';
@@ -246,6 +265,8 @@
         await showFrameAt(currentIndex, { resetView: true });
       }
 
+      timelineReady = true;
+      setTransportLoading(false);
       preloadRemainingFrames();
     } catch {
       // Keep the currently displayed latest image and retry on the next refresh.
@@ -303,6 +324,8 @@
     if (data.state === 'syncing') {
       if (!imageShown) {
         setOverlay('Synchronizing the most recent visible satellite frames. This can take a moment on a cold start…');
+      } else if (!timelineReady) {
+        setTransportLoading(true);
       }
       setTimeout(() => refresh(false), 2500);
     } else if (data.state === 'error' && !data.image_available) {
@@ -426,6 +449,7 @@
 
   updateFrameLabel();
   updatePlayPauseButton();
+  setTransportLoading(true);
   refresh(true);
 })();
 </script>
