@@ -159,6 +159,27 @@ impl RuntimeState {
     }
 }
 
+/// Creates `dir` if needed and verifies the current process can actually write to it,
+/// so misconfigured permissions on a mounted persistence volume fail fast with a clear error.
+async fn ensure_writable_dir(dir: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+
+    let probe = dir.join(".write-test");
+    tokio::fs::write(&probe, b"ok").await.with_context(|| {
+        format!(
+            "directory {} is not writable by the current user; check ownership/permissions of the persistence volume",
+            dir.display()
+        )
+    })?;
+    tokio::fs::remove_file(&probe)
+        .await
+        .with_context(|| format!("failed to clean up write test file in {}", dir.display()))?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -169,17 +190,8 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Arc::new(Config::parse());
-    tokio::fs::create_dir_all(&config.cache_dir)
-        .await
-        .with_context(|| format!("failed to create {}", config.cache_dir.display()))?;
-    tokio::fs::create_dir_all(config.cache_dir.join("archive"))
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create {}",
-                config.cache_dir.join("archive").display()
-            )
-        })?;
+    ensure_writable_dir(&config.cache_dir).await?;
+    ensure_writable_dir(&config.cache_dir.join("archive")).await?;
 
     let cache = load_cached_metadata(&config.cache_dir).await;
     if let Some(ref metadata) = cache {

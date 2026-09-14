@@ -61,17 +61,20 @@ COPY --from=rust-builder /app/target/release/mtg /usr/local/bin/mtg
 
 # Setup non-root user for security
 RUN useradd -u 10001 -m -U app && \
-    mkdir -p /app/cache && \
-    chown -R app:app /app/cache
+    mkdir -p /var/lib/mtg/cache && \
+    chown -R app:app /var/lib/mtg
 
 # Configure execution environment
 ENV PYTHON=/app/venv/bin/python
 ENV PATH="/app/venv/bin:$PATH"
 ENV HTTP_HOST=0.0.0.0
 ENV HTTP_PORT=3000
-ENV MTG_CACHE_DIR=/app/cache
+ENV MTG_CACHE_DIR=/var/lib/mtg/cache
 ENV MTG_PROCESSOR=/app/scripts/generate_image.py
 ENV DASK_SCHEDULER=synchronous
+
+# Persist downloaded/generated images across container recreation
+VOLUME ["/var/lib/mtg/cache"]
 
 USER app
 
