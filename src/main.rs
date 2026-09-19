@@ -323,7 +323,7 @@ async fn timeline(State(state): State<AppState>) -> Json<TimelineSnapshot> {
 
 async fn image(State(state): State<AppState>) -> Response {
     match tokio::fs::read(state.image_path()).await {
-        Ok(bytes) => png_response(bytes),
+        Ok(bytes) => png_response(bytes, "no-cache"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (StatusCode::NOT_FOUND, "image is not ready").into_response()
         }
@@ -354,7 +354,7 @@ async fn archived_image(
     };
 
     match state.read_archive_frame(&frame.id).await {
-        Ok(bytes) => png_response(bytes),
+        Ok(bytes) => png_response(bytes, "public, max-age=31536000, immutable"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (StatusCode::NOT_FOUND, "image is not ready").into_response()
         }
@@ -365,14 +365,14 @@ async fn archived_image(
     }
 }
 
-fn png_response(bytes: Vec<u8>) -> Response {
+fn png_response(bytes: Vec<u8>, cache_control: &'static str) -> Response {
     let mut response = Response::new(Body::from(bytes));
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=60"),
+        HeaderValue::from_static(cache_control),
     );
     response
 }

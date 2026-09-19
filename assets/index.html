@@ -93,19 +93,19 @@
   const PLAY_ICON = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
   const PAUSE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
 
-  const preloadCache = new Map();
+  const imageCache = new Map();
   const PLAY_INTERVAL_MS = 700;
   const MAX_SCALE = 12;
 
   let frames = [];
   let currentIndex = -1;
   let animationTimer = null;
-  let preloading = false;
   let scale = 1, minScale = 1, tx = 0, ty = 0;
   let latestFrameId = null;
   let displayedFrameId = null;
   let imageShown = false;
   let timelineReady = false;
+  let timelineLoading = false;
 
   function setOverlay(text, { error = false, spin = true } = {}) {
     overlay.classList.remove('hidden');
@@ -124,8 +124,8 @@
     frameLabel.textContent = `Frame ${current} of ${total}`;
     slider.max = Math.max(0, total - 1);
     slider.value = Math.max(0, currentIndex);
-    const enabled = total > 1;
-    slider.disabled = total === 0;
+    const enabled = timelineReady && total > 1;
+    slider.disabled = !timelineReady || total === 0;
     previousButton.disabled = !enabled;
     nextButton.disabled = !enabled;
     playPauseButton.disabled = total <= 1;
@@ -150,22 +150,28 @@
     timeLabel.textContent = new Date(frame.satellite_time).toLocaleString();
   }
 
-  function cacheKey(frame) {
-    return `${frame.image_url}?v=${frame.generated_unix}`;
-  }
-
   function preloadFrame(frame) {
-    const key = cacheKey(frame);
-    if (!preloadCache.has(key)) {
-      preloadCache.set(key, new Promise((resolve, reject) => {
-        const loader = new Image();
-        loader.decoding = 'async';
-        loader.onload = () => resolve(key);
-        loader.onerror = reject;
-        loader.src = key;
-      }));
-    }
-    return preloadCache.get(key);
+    const cached = imageCache.get(frame.id);
+    if (cached?.url === frame.image_url) return cached.promise;
+
+    const loader = new Image();
+    loader.decoding = 'async';
+    const promise = new Promise((resolve, reject) => {
+      loader.onload = async () => {
+        try {
+          await loader.decode();
+        } catch {
+        }
+        resolve();
+      };
+      loader.onerror = () => {
+        imageCache.delete(frame.id);
+        reject(new Error(`failed to preload frame ${frame.id}`));
+      };
+      loader.src = frame.image_url;
+    });
+    imageCache.set(frame.id, { url: frame.image_url, image: loader, promise });
+    return promise;
   }
 
   async function waitForDisplayedImage(expectedSrc) {
@@ -196,10 +202,9 @@
 
   async function showFrame(frame, { resetView = false } = {}) {
     try {
-      const key = cacheKey(frame);
       await preloadFrame(frame);
-      image.src = key;
-      await waitForDisplayedImage(key);
+      image.src = frame.image_url;
+      await waitForDisplayedImage(frame.image_url);
       displayedFrameId = frame.id;
       setCurrentFrame(frame);
       const needsFit = resetView || !imageShown;
@@ -241,17 +246,35 @@
   }
 
   async function loadTimeline() {
+    if (timelineLoading) return;
+    timelineLoading = true;
     try {
       const currentFrameId =
         currentIndex >= 0 && currentIndex < frames.length ? frames[currentIndex].id : latestFrameId;
       const response = await fetch('/api/timeline');
       if (!response.ok) throw new Error('timeline request failed');
       const data = await response.json();
-      frames = Array.isArray(data.frames) ? data.frames : [];
+      const nextFrames = Array.isArray(data.frames) ? data.frames : [];
+      const timelineUnchanged =
+        nextFrames.length === frames.length &&
+        nextFrames.every((frame, index) => frame.id === frames[index].id);
+      if (timelineUnchanged) return;
+
+      frames = nextFrames;
       latestFrameId = frames.length ? frames[frames.length - 1].id : latestFrameId;
+      const activeIds = new Set(frames.map((frame) => frame.id));
+      for (const frameId of imageCache.keys()) {
+        if (!activeIds.has(frameId)) imageCache.delete(frameId);
+      }
+
+      timelineReady = false;
+      setTransportLoading(true);
       updateFrameLabel();
 
-      if (!frames.length) return;
+      if (!frames.length) {
+        timelineReady = true;
+        return;
+      }
 
       const activeIndex = frames.findIndex((frame) => frame.id === currentFrameId);
       if (activeIndex >= 0) {
@@ -265,26 +288,20 @@
         await showFrameAt(currentIndex, { resetView: true });
       }
 
+      await preloadRemainingFrames(frames);
       timelineReady = true;
-      setTransportLoading(false);
-      preloadRemainingFrames();
     } catch {
       // Keep the currently displayed latest image and retry on the next refresh.
+    } finally {
+      timelineLoading = false;
+      setTransportLoading(!timelineReady);
+      updateFrameLabel();
     }
   }
 
-  async function preloadRemainingFrames() {
-    if (preloading) return;
-    preloading = true;
-    const snapshot = frames.slice();
-    const activeIndex = currentIndex;
-    try {
-      for (let index = snapshot.length - 1; index >= 0; index -= 1) {
-        if (index === activeIndex) continue;
-        await preloadFrame(snapshot[index]);
-      }
-    } finally {
-      preloading = false;
+  async function preloadRemainingFrames(snapshot) {
+    for (let index = snapshot.length - 1; index >= 0; index -= 1) {
+      await preloadFrame(snapshot[index]);
     }
   }
 

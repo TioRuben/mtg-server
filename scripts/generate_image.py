@@ -246,7 +246,13 @@ def clear_latest(latest_image: Path, latest_metadata: Path) -> None:
     delete_if_exists(latest_metadata)
 
 
-def download_product(product: Product, token: str, workdir: Path) -> list[Path]:
+def download_product(
+    product: Product,
+    token_state: dict[str, str],
+    key: str,
+    secret: str,
+    workdir: Path,
+) -> list[Path]:
     base = (
         f"{API_BASE}/data/download/1.0.0/collections/"
         f"{urllib.parse.quote(product.collection, safe='')}/products/"
@@ -266,7 +272,7 @@ def download_product(product: Product, token: str, workdir: Path) -> list[Path]:
         def fetch() -> None:
             request = urllib.request.Request(
                 url,
-                headers={"Authorization": "Bearer " + token},
+                headers={"Authorization": "Bearer " + token_state["value"]},
             )
             with urllib.request.urlopen(request, timeout=600) as response:
                 temporary = destination.with_suffix(".part")
@@ -274,7 +280,14 @@ def download_product(product: Product, token: str, workdir: Path) -> list[Path]:
                     shutil.copyfileobj(response, handle, length=1 << 20)
                 temporary.replace(destination)
 
-        retrying(fetch)
+        try:
+            retrying(fetch)
+        except urllib.error.HTTPError as error:
+            if error.code != 401:
+                raise
+            log("  access token expired; requesting a new token and retrying chunk")
+            token_state["value"] = get_token(key, secret)
+            retrying(fetch)
     return paths
 
 
@@ -341,13 +354,19 @@ def compose(files: list[Path], output: Path) -> str:
     return start_time.strftime("%Y-%m-%dT%H:%M:%SZ") if start_time else ""
 
 
-def generate_frame(pair: ProductPair, token: str, output: Path) -> dict:
+def generate_frame(
+    pair: ProductPair,
+    token_state: dict[str, str],
+    key: str,
+    secret: str,
+    output: Path,
+) -> dict:
     frame_id = frame_id_for(pair.start)
     workdir = Path(tempfile.mkdtemp(prefix=f"mtg-{frame_id}-"))
     try:
         log(f"  downloading 2x{len(CHUNKS)} NetCDF chunks for frame {frame_id}...")
-        files = download_product(pair.fdhsi, token, workdir)
-        files += download_product(pair.hrfi, token, workdir)
+        files = download_product(pair.fdhsi, token_state, key, secret, workdir)
+        files += download_product(pair.hrfi, token_state, key, secret, workdir)
         output.parent.mkdir(parents=True, exist_ok=True)
         satellite_time = compose(files, output) or pair.start
     finally:
@@ -364,6 +383,8 @@ def generate_frame(pair: ProductPair, token: str, output: Path) -> dict:
 def sync_archive(
     *,
     token: str,
+    key: str,
+    secret: str,
     archive_dir: Path,
     manifest_path: Path,
     latest_image: Path,
@@ -390,6 +411,7 @@ def sync_archive(
 
     keep: dict[str, dict] = {}
     downloaded_count = 0
+    token_state = {"value": token}
 
     for index, pair in enumerate(pairs):
         frame_id = frame_id_for(pair.start)
@@ -401,7 +423,7 @@ def sync_archive(
         else:
             downloaded_count += 1
             log(f"[{downloaded_count}/{len(missing_pairs)}] generating frame {frame_id} (observation: {pair.start})...")
-            metadata = generate_frame(pair, token, frame_path)
+            metadata = generate_frame(pair, token_state, key, secret, frame_path)
             keep[frame_id] = metadata
             log(f"[{downloaded_count}/{len(missing_pairs)}] completed frame {frame_id} (satellite time: {metadata['satellite_time']})")
 
@@ -459,6 +481,8 @@ def main() -> int:
     log("synchronizing recent visible repeat cycles")
     sync_archive(
         token=token,
+        key=key,
+        secret=secret,
         archive_dir=args.archive_dir,
         manifest_path=args.manifest,
         latest_image=args.output,
