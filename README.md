@@ -4,7 +4,7 @@ A highly optimized Rust and Python hybrid web application to query, download, an
 
 ## Features
 - **Fast Rust Backend**: An asynchronous `axum`-based HTTP server handles fast caching, cache-control, metadata lookups, and orchestrates the image processing worker safely.
-- **Automatic Rolling Archive**: The server keeps roughly the last 6 hours of visible-only MTG frames in an ephemeral on-disk cache, refreshes them automatically, and prunes old images without using a database.
+- **Automatic Rolling Archive**: The server keeps roughly the last 6 hours of visible-only MTG frames as WebP images in an ephemeral on-disk cache, refreshes them automatically, and prunes old images without using a database.
 - **Mobile-friendly Animation UI**: The browser opens on the newest frame, preloads the remaining archive in the background, and offers playback controls plus pinch-zoom/pan support.
 - **Python Image Processor**: Utilizes `Satpy` and `Pyresample` to parse complex satellite NetCDF data, resample onto a precise geographical region over Iberia, and apply high-resolution ratio sharpening with the 0.5 km `vis_06_hr` channel.
 - **Efficient Downloader**: Pre-filtered body chunk selection downloads only the exact segments covering Spain, Portugal, and the Balearic Islands, minimizing bandwidth usage and processing time.
@@ -94,14 +94,25 @@ Returns the cached animation frames in chronological order.
 Serves the latest rendered high-resolution true-color WebP.
 
 - **Endpoint**: `GET /image/latest.webp`
+- **Content type**: `image/webp`
 
 ### 5. Get Archived Frame
-Serves a specific cached frame from the rolling archive.
+Serves a specific cached WebP frame from the rolling archive.
 
 - **Endpoint**: `GET /image/frames/{frame_id}`
 
 ### Cache Migration
-On the next synchronization, the processor automatically converts existing cached PNG images to WebP locally before checking EUMETSAT credentials. This reuses the current archive and avoids downloading the raw satellite data again.
+The current cache layout is:
+
+```text
+cache/
+├── latest.webp
+├── latest.json
+├── manifest.json
+└── archive/*.webp
+```
+
+On the next synchronization, the processor automatically converts existing cached PNG images to WebP locally before checking EUMETSAT credentials. The converted files replace the PNG files, so the current archive is reused without downloading the raw satellite data again. The old `/image/latest.png` URL is no longer served.
 
 To run only the local conversion manually:
 
@@ -124,7 +135,7 @@ You can configure the server using command line arguments or environment variabl
 |---|---|---|---|
 | `--host` | `HTTP_HOST` | `0.0.0.0` | Host interface to bind to |
 | `--port` | `HTTP_PORT` | `3000` | Port to expose the HTTP server on |
-| `--cache-dir` | `MTG_CACHE_DIR` | `/app/cache` | Ephemeral directory to save latest image, archive frames, and metadata |
+| `--cache-dir` | `MTG_CACHE_DIR` | `/app/cache` | Ephemeral directory to save the latest WebP image, archive frames, and metadata |
 | `--consumer-key` | `EUMETSAT_CONSUMER_KEY` | - | Your EUMETSAT API key |
 | `--consumer-secret` | `EUMETSAT_CONSUMER_SECRET` | - | Your EUMETSAT API secret |
 
