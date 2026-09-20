@@ -29,6 +29,13 @@ use tracing::{error, info};
 const SYNC_DEBOUNCE: Duration = Duration::from_secs(60);
 const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const INDEX_HTML: &str = include_str!("../assets/index.html");
+const SITE_MANIFEST: &str = include_str!("../assets/site.webmanifest");
+const FAVICON_ICO: &[u8] = include_bytes!("../assets/favicon.ico");
+const FAVICON_16: &[u8] = include_bytes!("../assets/favicon-16x16.png");
+const FAVICON_32: &[u8] = include_bytes!("../assets/favicon-32x32.png");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../assets/apple-touch-icon.png");
+const ICON_192: &[u8] = include_bytes!("../assets/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../assets/icon-512.png");
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Serve MTG archive images over Iberia")]
@@ -223,6 +230,13 @@ async fn main() -> Result<()> {
         .route("/api/timeline", get(timeline))
         .route("/image/latest.webp", get(image))
         .route("/image/frames/{frame_id}", get(archived_image))
+        .route("/site.webmanifest", get(site_manifest))
+        .route("/favicon.ico", get(favicon_ico))
+        .route("/favicon-16x16.png", get(favicon_16))
+        .route("/favicon-32x32.png", get(favicon_32))
+        .route("/apple-touch-icon.png", get(apple_touch_icon))
+        .route("/icon-192.png", get(icon_192))
+        .route("/icon-512.png", get(icon_512))
         .with_state(state);
 
     let address = format!("{}:{}", config.host, config.port);
@@ -303,6 +317,42 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn site_manifest() -> Response {
+    static_asset_response(
+        SITE_MANIFEST.as_bytes(),
+        "application/manifest+json",
+        "public, max-age=86400",
+    )
+}
+
+async fn favicon_ico() -> Response {
+    static_asset_response(FAVICON_ICO, "image/x-icon", "public, max-age=31536000, immutable")
+}
+
+async fn favicon_16() -> Response {
+    static_asset_response(FAVICON_16, "image/png", "public, max-age=31536000, immutable")
+}
+
+async fn favicon_32() -> Response {
+    static_asset_response(FAVICON_32, "image/png", "public, max-age=31536000, immutable")
+}
+
+async fn apple_touch_icon() -> Response {
+    static_asset_response(
+        APPLE_TOUCH_ICON,
+        "image/png",
+        "public, max-age=31536000, immutable",
+    )
+}
+
+async fn icon_192() -> Response {
+    static_asset_response(ICON_192, "image/png", "public, max-age=31536000, immutable")
+}
+
+async fn icon_512() -> Response {
+    static_asset_response(ICON_512, "image/png", "public, max-age=31536000, immutable")
+}
+
 async fn status(State(state): State<AppState>) -> Json<StatusSnapshot> {
     let image_exists = state.image_path().is_file();
     Json(state.runtime.lock().await.snapshot(image_exists))
@@ -370,6 +420,23 @@ fn webp_response(bytes: Vec<u8>, cache_control: &'static str) -> Response {
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    response
+}
+
+fn static_asset_response(
+    bytes: &'static [u8],
+    content_type: &'static str,
+    cache_control: &'static str,
+) -> Response {
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type),
+    );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control),
