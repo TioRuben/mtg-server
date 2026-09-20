@@ -38,9 +38,9 @@
   .transport-button.primary { background: #1f6feb; }
   .transport-button svg { width: 1.3rem; height: 1.3rem; display: block; fill: currentColor; }
   #transport.loading .transport-button { visibility: hidden; }
-  .mini-spinner { width: 1.4rem; height: 1.4rem; border-radius: 50%; border: 2px solid rgba(230,237,243,.25);
-    border-top-color: #58a6ff; animation: spin .8s linear infinite; position: absolute; left: 50%; top: 50%;
-    transform: translate(-50%, -50%); pointer-events: none; }
+  .transport-status { font-size: .68rem; color: #9fb0c0; white-space: nowrap; position: absolute; left: 50%;
+    top: 50%; transform: translate(-50%, -50%); pointer-events: none; max-width: 92%; overflow: hidden;
+    text-overflow: ellipsis; }
   #timeline-slider { flex: 1; accent-color: #58a6ff; min-width: 0; }
   #frame-label { min-width: 3.5rem; text-align: right; font-size: .8rem; color: #9fb0c0; font-variant-numeric: tabular-nums; }
   #copyright-button { width: 1.6rem; height: 1.6rem; font-size: .8rem; }
@@ -76,7 +76,7 @@
     <button class="transport-button" id="previous" aria-label="Previous frame"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
     <button class="transport-button primary" id="play-pause" aria-label="Play animation"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
     <button class="transport-button" id="next" aria-label="Next frame"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
-    <span class="mini-spinner" id="transport-spinner" hidden></span>
+    <span class="transport-status" id="transport-status" hidden></span>
     <button class="transport-button" id="copyright-button" aria-label="Copyright information">&copy;</button>
   </div>
   <input id="timeline-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline" aria-describedby="frame-label">
@@ -108,7 +108,7 @@
   const slider = document.getElementById('timeline-slider');
   const frameLabel = document.getElementById('frame-label');
   const transport = document.getElementById('transport');
-  const transportSpinner = document.getElementById('transport-spinner');
+  const transportStatus = document.getElementById('transport-status');
   const copyrightButton = document.getElementById('copyright-button');
   const copyrightDialog = document.getElementById('copyright-dialog');
   const copyrightClose = document.getElementById('copyright-close');
@@ -160,9 +160,10 @@
     playPauseButton.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
   }
 
-  function setTransportLoading(loading) {
+  function setTransportLoading(loading, text = 'Loading timeline…') {
     transport.classList.toggle('loading', loading);
-    transportSpinner.hidden = !loading;
+    transportStatus.hidden = !loading;
+    transportStatus.textContent = loading ? text : '';
   }
 
   function setCurrentFrame(frame) {
@@ -311,7 +312,12 @@
         await showFrameAt(currentIndex, { resetView: true });
       }
 
+      const activeFrame = frames[currentIndex];
       await preloadRemainingFrames(frames);
+      frames = frames.filter((frame) => !frame.failed);
+      latestFrameId = frames.length ? frames[frames.length - 1].id : latestFrameId;
+      const restoredIndex = activeFrame ? frames.findIndex((frame) => frame.id === activeFrame.id) : -1;
+      currentIndex = restoredIndex >= 0 ? restoredIndex : Math.max(0, frames.length - 1);
       timelineReady = true;
     } catch {
       // Keep the currently displayed latest image and retry on the next refresh.
@@ -323,8 +329,17 @@
   }
 
   async function preloadRemainingFrames(snapshot) {
+    const total = snapshot.length;
+    let done = 0;
     for (let index = snapshot.length - 1; index >= 0; index -= 1) {
-      await preloadFrame(snapshot[index]);
+      const frame = snapshot[index];
+      done += 1;
+      setTransportLoading(true, `Downloading image ${done} of ${total}`);
+      try {
+        await preloadFrame(frame);
+      } catch {
+        frame.failed = true;
+      }
     }
   }
 
