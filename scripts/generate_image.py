@@ -6,7 +6,7 @@ Steps:
   2. Search recent FDHSI (EO:EUM:DAT:0662) and HRFI (EO:EUM:DAT:0665) products.
   3. Pair repeat cycles with the same sensing start and keep only the last 6 hours.
   4. Skip nighttime frames by checking solar elevation over Iberia.
-  5. Download missing chunk subsets, render PNGs, update manifest/latest files, and prune old frames.
+    5. Download missing chunk subsets, render WebPs, update manifest/latest files, and prune old frames.
 
 Credentials are read from EUMETSAT_CONSUMER_KEY / EUMETSAT_CONSUMER_SECRET.
 """
@@ -227,10 +227,46 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def convert_png_to_webp(source: Path, destination: Path) -> None:
+    if destination.exists():
+        delete_if_exists(source)
+        return
+
+    from PIL import Image
+
+    temporary = destination.with_name(f"{destination.stem}.migration{destination.suffix}")
+    try:
+        with Image.open(source) as image:
+            image.save(temporary, format="WEBP", quality=90, method=6)
+        temporary.replace(destination)
+    finally:
+        delete_if_exists(temporary)
+    delete_if_exists(source)
+
+
+def migrate_legacy_cache(latest_image: Path, archive_dir: Path) -> int:
+    legacy_images = list(archive_dir.glob("*.png"))
+    legacy_latest = latest_image.with_suffix(".png")
+    if legacy_latest.is_file():
+        legacy_images.append(legacy_latest)
+
+    converted = 0
+    for source in legacy_images:
+        destination = source.with_suffix(".webp")
+        convert_png_to_webp(source, destination)
+        converted += 1
+
+    if converted:
+        log(f"converted {converted} cached PNG image(s) to WebP without downloading raw data")
+    return converted
+
+
 def sync_latest_files(frame_path: Path, latest_image: Path, latest_metadata: Path, metadata: dict) -> None:
     latest_image.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(frame_path, latest_image.with_suffix(".tmp.png"))
-    latest_image.with_suffix(".tmp.png").replace(latest_image)
+    temporary = latest_image.with_suffix(latest_image.suffix + ".tmp")
+    shutil.copyfile(frame_path, temporary)
+    temporary.replace(latest_image)
+    delete_if_exists(latest_image.with_suffix(".png"))
     write_json_atomic(latest_metadata, metadata)
 
 
@@ -243,6 +279,7 @@ def delete_if_exists(path: Path) -> None:
 
 def clear_latest(latest_image: Path, latest_metadata: Path) -> None:
     delete_if_exists(latest_image)
+    delete_if_exists(latest_image.with_suffix(".png"))
     delete_if_exists(latest_metadata)
 
 
@@ -338,7 +375,7 @@ def compose(files: list[Path], output: Path) -> str:
     ratio = np.clip(ratio, 0.6, 1.4)
     sharpened_data = np.clip(rgb_data * ratio[np.newaxis, :, :], 0.0, 1.0)
 
-    log("  [compose] rendering PNG...")
+    log("  [compose] rendering WebP...")
     final_xr = xr.DataArray(
         sharpened_data,
         dims=rgb_img.data.dims,
@@ -346,7 +383,7 @@ def compose(files: list[Path], output: Path) -> str:
     )
 
     final_image = XRImage(final_xr)
-    temporary = output.with_suffix(".tmp.png")
+    temporary = output.with_name(f"{output.stem}.tmp{output.suffix}")
     final_image.save(str(temporary))
     temporary.replace(output)
 
@@ -400,7 +437,7 @@ def sync_archive(
         for pair in pairs
         if not (
             existing.get(frame_id_for(pair.start))
-            and (archive_dir / f"{frame_id_for(pair.start)}.png").exists()
+            and (archive_dir / f"{frame_id_for(pair.start)}.webp").exists()
         )
     ]
     cached_count = len(pairs) - len(missing_pairs)
@@ -415,7 +452,7 @@ def sync_archive(
 
     for index, pair in enumerate(pairs):
         frame_id = frame_id_for(pair.start)
-        frame_path = archive_dir / f"{frame_id}.png"
+        frame_path = archive_dir / f"{frame_id}.webp"
         metadata = existing.get(frame_id)
 
         if metadata and frame_path.exists():
@@ -443,6 +480,10 @@ def sync_archive(
     keep_ids = {frame["id"] for frame in ordered_frames}
     pruned_count = 0
     for image_path in archive_dir.glob("*.png"):
+        image_path.unlink(missing_ok=True)
+        pruned_count += 1
+
+    for image_path in archive_dir.glob("*.webp"):
         if image_path.stem not in keep_ids:
             image_path.unlink(missing_ok=True)
             pruned_count += 1
@@ -458,10 +499,15 @@ def sync_archive(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, required=True, help="Destination PNG for the latest frame")
+    parser.add_argument("--output", type=Path, required=True, help="Destination WebP for the latest frame")
     parser.add_argument("--metadata", type=Path, required=True, help="Destination JSON for the latest frame")
     parser.add_argument("--manifest", type=Path, required=True, help="Destination JSON manifest for the archive")
-    parser.add_argument("--archive-dir", type=Path, required=True, help="Directory used for cached archive PNGs")
+    parser.add_argument("--archive-dir", type=Path, required=True, help="Directory used for cached archive WebPs")
+    parser.add_argument(
+        "--migrate-only",
+        action="store_true",
+        help="Convert cached PNG images to WebP and exit without contacting EUMETSAT",
+    )
     parser.add_argument(
         "--history-hours",
         type=int,
@@ -469,6 +515,10 @@ def main() -> int:
         help="How many hours of visible frames to keep",
     )
     args = parser.parse_args()
+
+    migrate_legacy_cache(args.output, args.archive_dir)
+    if args.migrate_only:
+        return 0
 
     key = os.environ.get("EUMETSAT_CONSUMER_KEY")
     secret = os.environ.get("EUMETSAT_CONSUMER_SECRET")

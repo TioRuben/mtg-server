@@ -71,7 +71,7 @@ Returns a JSON snapshot of the server's state, indicating whether an image is av
   {
     "state": "ready",
     "image_available": true,
-    "image_url": "/image/latest.png",
+    "image_url": "/image/latest.webp",
     "frame_id": "20260723T182007Z",
     "generated_unix": 1784826123,
     "satellite_time": "2026-07-23T18:20:07Z",
@@ -91,14 +91,28 @@ Returns the cached animation frames in chronological order.
 - **Endpoint**: `GET /api/timeline`
 
 ### 4. Get Latest Image
-Serves the latest rendered high-resolution true-color PNG.
+Serves the latest rendered high-resolution true-color WebP.
 
-- **Endpoint**: `GET /image/latest.png`
+- **Endpoint**: `GET /image/latest.webp`
 
 ### 5. Get Archived Frame
 Serves a specific cached frame from the rolling archive.
 
 - **Endpoint**: `GET /image/frames/{frame_id}`
+
+### Cache Migration
+On the next synchronization, the processor automatically converts existing cached PNG images to WebP locally before checking EUMETSAT credentials. This reuses the current archive and avoids downloading the raw satellite data again.
+
+To run only the local conversion manually:
+
+```bash
+python3 scripts/generate_image.py \
+  --output cache/latest.webp \
+  --metadata cache/latest.json \
+  --manifest cache/manifest.json \
+  --archive-dir cache/archive \
+  --migrate-only
+```
 
 ---
 

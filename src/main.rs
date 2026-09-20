@@ -147,7 +147,7 @@ impl RuntimeState {
         StatusSnapshot {
             state,
             image_available: image_exists,
-            image_url: image_exists.then_some("/image/latest.png"),
+            image_url: image_exists.then_some("/image/latest.webp"),
             frame_id: self.cache.as_ref().map(|metadata| metadata.id.clone()),
             generated_unix: self.cache.as_ref().map(|metadata| metadata.generated_unix),
             satellite_time: self
@@ -221,7 +221,7 @@ async fn main() -> Result<()> {
         .route("/api/status", get(status))
         .route("/api/latest", post(latest))
         .route("/api/timeline", get(timeline))
-        .route("/image/latest.png", get(image))
+        .route("/image/latest.webp", get(image))
         .route("/image/frames/{frame_id}", get(archived_image))
         .with_state(state);
 
@@ -323,7 +323,7 @@ async fn timeline(State(state): State<AppState>) -> Json<TimelineSnapshot> {
 
 async fn image(State(state): State<AppState>) -> Response {
     match tokio::fs::read(state.image_path()).await {
-        Ok(bytes) => png_response(bytes, "no-cache"),
+        Ok(bytes) => webp_response(bytes, "no-cache"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (StatusCode::NOT_FOUND, "image is not ready").into_response()
         }
@@ -354,7 +354,7 @@ async fn archived_image(
     };
 
     match state.read_archive_frame(&frame.id).await {
-        Ok(bytes) => png_response(bytes, "public, max-age=31536000, immutable"),
+        Ok(bytes) => webp_response(bytes, "public, max-age=31536000, immutable"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (StatusCode::NOT_FOUND, "image is not ready").into_response()
         }
@@ -365,11 +365,11 @@ async fn archived_image(
     }
 }
 
-fn png_response(bytes: Vec<u8>, cache_control: &'static str) -> Response {
+fn webp_response(bytes: Vec<u8>, cache_control: &'static str) -> Response {
     let mut response = Response::new(Body::from(bytes));
     response
         .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control),
@@ -379,7 +379,7 @@ fn png_response(bytes: Vec<u8>, cache_control: &'static str) -> Response {
 
 impl AppState {
     fn image_path(&self) -> PathBuf {
-        self.config.cache_dir.join("latest.png")
+        self.config.cache_dir.join("latest.webp")
     }
 
     fn metadata_path(&self) -> PathBuf {
@@ -399,7 +399,7 @@ impl AppState {
             return None;
         }
 
-        Some(self.archive_dir().join(format!("{frame_id}.png")))
+        Some(self.archive_dir().join(format!("{frame_id}.webp")))
     }
 
     async fn read_archive_frame(&self, frame_id: &str) -> io::Result<Vec<u8>> {
@@ -423,7 +423,7 @@ impl AppState {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            let Some(stem) = name.strip_suffix(".png") else {
+            let Some(stem) = name.strip_suffix(".webp") else {
                 continue;
             };
             if is_valid_frame_id(stem) {
@@ -579,7 +579,7 @@ fn timeline_frames(
 }
 
 async fn load_cached_metadata(cache_dir: &Path) -> Option<FrameMetadata> {
-    if !cache_dir.join("latest.png").is_file() {
+    if !cache_dir.join("latest.webp").is_file() {
         return None;
     }
 
